@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>郊狼配对站</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .container {
+    max-width: 480px;
+    width: 100%;
+    padding: 20px;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  p.subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 24px; }
+  .card { background: var(--card); border-radius: 12px; padding: 20px; margin-bottom: 12px; }
+  .card h2 { font-size: 1rem; margin-bottom: 12px; }
+  button {
+    width: 100%; padding: 12px 20px; border-radius: 8px; border: none;
+    font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.15s;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:hover:not(:disabled) { background: #2563eb; }
+  .status {
+    padding: 10px 12px; border-radius: 8px; margin-top: 10px;
+    font-size: 0.85rem; line-height: 1.5;
+  }
+  .status-ok { background: #064e3b; color: #86efac; }
+  .status-err { background: #450a0a; color: #fca5a5; }
+  .status-info { background: #172554; color: #93c5fd; }
+  .status-warn { background: #451a03; color: #fcd34d; }
+  .device-info { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.85rem; }
+  .device-info dt { color: var(--muted); }
+  .device-info dd { font-weight: 500; }
+  .log {
+    background: #0b1120; border-radius: 8px; padding: 12px; max-height: 200px;
+    overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  }
+  .log .ts { color: var(--muted); margin-right: 6px; }
+  .log .ok { color: var(--green); }
+  .log .err { color: var(--red); }
+  .log .warn { color: var(--amber); }
+  .log .info { color: #93c5fd; }
+  .dots::after { content: ''; animation: dots 1.5s steps(4, end) infinite; }
+  @keyframes dots {
+    0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>郊狼配对站</h1>
+  <p class="subtitle">DG-Lab Coyote 3.0 首次蓝牙配对。配对后浏览器会记住设备，后续可直接连接。</p>
+
+  <div class="card">
+    <h2>1. 环境检测</h2>
+    <div id="env-status" class="status status-info">检测中...</div>
+  </div>
+
+  <div class="card" id="pair-card">
+    <h2>2. 查找设备</h2>
+    <p style="font-size:0.85rem;color:var(--muted);margin-bottom:12px;">
+      点击按钮，Chrome 会弹出设备选择器。厂商过滤只显示郊狼设备。
+    </p>
+    <button id="btn-pair" class="btn-primary" onclick="pairDevice()">查找郊狼设备</button>
+    <div id="pair-status"></div>
+  </div>
+
+  <div class="card" id="result-card" style="display:none;">
+    <h2>3. 设备信息</h2>
+    <dl class="device-info" id="device-details"></dl>
+    <div id="result-status"></div>
+  </div>
+
+  <div class="card">
+    <h2>日志</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+// =========================================================================
+// Coyote BLE 常量
+// =========================================================================
+const COYOTE_MFR_ID = 0x369b;
+const V3_NAME_PREFIX = '47L121';
+const V3_SERVICE = '0000180c-0000-1000-8000-00805f9b34fb';
+const V3_WRITE   = '0000150a-0000-1000-8000-00805f9b34fb';
+const V3_NOTIFY  = '0000150b-0000-1000-8000-00805f9b34fb';
+const BATTERY_SVC = '0000180a-0000-1000-8000-00805f9b34fb';
+const BATTERY_CHR = '00001500-0000-1000-8000-00805f9b34fb';
+const GAP_SERVICE = '00001800-0000-1000-8000-00805f9b34fb';
+const GAP_NAME    = '00002a00-0000-1000-8000-00805f9b34fb';
+
+const OPTIONAL_SERVICES = [V3_SERVICE, BATTERY_SVC, GAP_SERVICE];
+
+const COYOTE_FILTERS = [
+  { manufacturerData: [{ companyIdentifier: COYOTE_MFR_ID }] },
+  { namePrefix: V3_NAME_PREFIX },
+  { namePrefix: '47L120' },
+  { namePrefix: 'D-LAB ESTIM' },
+  { services: [V3_SERVICE] },
+];
+
+// =========================================================================
+// 日志
+// =========================================================================
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+  const t = new Date().toLocaleTimeString();
+  const span = cls ? `<span class="${cls}">${msg}</span>` : msg;
+  logEl.innerHTML += `<span class="ts">${t}</span> ${span}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// =========================================================================
+// 环境检测
+// =========================================================================
+(function checkEnv() {
+  const el = document.getElementById('env-status');
+  if (!navigator.bluetooth) {
+    el.className = 'status status-err';
+    el.textContent = 'Web Bluetooth 不可用。请使用 Chrome 或 Edge 浏览器。';
+    document.getElementById('btn-pair').disabled = true;
+    return;
+  }
+  el.className = 'status status-ok';
+  el.textContent = 'Web Bluetooth: 正常 | 系统: ' + navigator.platform;
+})();
+
+// =========================================================================
+// 配对主流程
+// =========================================================================
+async function pairDevice() {
+  const btn = document.getElementById('btn-pair');
+  const statusEl = document.getElementById('pair-status');
+  const resultCard = document.getElementById('result-card');
+  const detailsEl = document.getElementById('device-details');
+  const resultStatus = document.getElementById('result-status');
+
+  btn.disabled = true;
+  btn.textContent = '扫描中...';
+
+  let device, gatt, server;
+  let usedAcceptAll = false;
+
+  try {
+    // ---- 阶段 1: 过滤扫描 ----
+    log('阶段 1: 过滤扫描 (厂商 ID 0x369B + 名称 + 服务)', 'info');
+    statusEl.innerHTML = '<div class="status status-info">正在查找郊狼设备<span class="dots"></span></div>';
+
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: COYOTE_FILTERS,
+        optionalServices: OPTIONAL_SERVICES,
+      });
+    } catch (e) {
+      if (e.name === 'NotFoundError') {
+        log('阶段 1 未找到设备 (旧版 Chrome 或无名称广播)。进入阶段 2...', 'warn');
+        statusEl.innerHTML = '<div class="status status-warn">过滤未找到设备，显示全部 BLE 设备<span class="dots"></span></div>';
+
+        // ---- 阶段 2: 显示全部设备 ----
+        device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: OPTIONAL_SERVICES,
+        });
+        usedAcceptAll = true;
+        log('阶段 2: 用户从全部设备列表中选择了设备', 'info');
+      } else {
+        throw e;
+      }
+    }
+
+    log(`已选择设备: "${device.name || '(无名称)'}" [${device.id}]`, 'info');
+
+    // ---- GATT 连接 ----
+    statusEl.innerHTML = '<div class="status status-info">正在 GATT 连接<span class="dots"></span></div>';
+    gatt = device.gatt;
+    if (!gatt) throw new Error('设备不支持 GATT');
+
+    server = await gatt.connect();
+    log('GATT 已连接', 'ok');
+
+    // ---- 验证郊狼身份 ----
+    const displayName = device.name || '(无名称)';
+
+    if (usedAcceptAll && !isCoyoteName(displayName)) {
+      log('通过 GAP Device Name 验证设备身份...', 'info');
+      const gattName = await readGapName(server);
+      log(`GAP Device Name: "${gattName || '无'}"`, 'info');
+
+      if (!gattName || !isCoyoteName(gattName)) {
+        gatt.disconnect();
+        throw new Error(
+          `该设备不是郊狼脉冲主机 (GATT 名称: "${gattName || '无'}")。` +
+          '请重新选择信号最强的那个设备。'
+        );
+      }
+      log('GAP 名称验证通过，确认为郊狼设备', 'ok');
+    }
+
+    // ---- 发现郊狼服务 ----
+    statusEl.innerHTML = '<div class="status status-info">正在发现服务<span class="dots"></span></div>';
+
+    let coyoteService, writeChar, notifyChar, batteryLevel = null;
+
+    try {
+      coyoteService = await server.getPrimaryService(V3_SERVICE);
+      log('郊狼 V3 服务 (0x180C) 已发现', 'ok');
+    } catch {
+      gatt.disconnect();
+      throw new Error('未找到郊狼 V3 服务 (0x180C)');
+    }
+
+    writeChar = await coyoteService.getCharacteristic(V3_WRITE);
+    log(`WRITE 特性 (0x150A): ${propsStr(writeChar)}`, 'info');
+
+    notifyChar = await coyoteService.getCharacteristic(V3_NOTIFY);
+    log(`NOTIFY 特性 (0x150B): ${propsStr(notifyChar)}`, 'info');
+
+    // ---- 电量 ----
+    try {
+      const batSvc = await server.getPrimaryService(BATTERY_SVC);
+      const batChar = await batSvc.getCharacteristic(BATTERY_CHR);
+      const data = await batChar.readValue();
+      batteryLevel = data.getUint8(0);
+      log(`电量: ${batteryLevel}%`, 'ok');
+    } catch {
+      log('电量读取跳过 (服务不可用)', 'warn');
+    }
+
+    // ---- 协议测试: BF + B0 初始化 ----
+    statusEl.innerHTML = '<div class="status status-info">正在测试协议<span class="dots"></span></div>';
+
+    try {
+      await notifyChar.startNotifications();
+      let b1Received = false;
+      notifyChar.addEventListener('characteristicvaluechanged', (e) => {
+        const v = e.target.value;
+        if (v && v.byteLength >= 4 && v.getUint8(0) === 0xb1) {
+          log(`B1 回应: seq=${v.getUint8(1)} A=${v.getUint8(2)} B=${v.getUint8(3)}`, 'ok');
+          b1Received = true;
+        }
+      });
+      log('已订阅 0x150B 通知', 'ok');
+
+      // 发送 BF (软上限 + 平衡参数)
+      const bf = new Uint8Array([0xbf, 200, 200, 160, 160, 0, 0]);
+      await writeChar.writeValueWithoutResponse(bf);
+      log('BF 指令已发送 (上限=200/200)', 'info');
+
+      await sleep(100);
+
+      // 发送 B0 初始化 (两通道归零, 无波形)
+      const b0 = new Uint8Array(20);
+      b0[0] = 0xb0;
+      b0[1] = 0x0f;  // seq=0, mode=0b1111 (两通道绝对值)
+      b0[2] = 0;     // A 强度 = 0
+      b0[3] = 0;     // B 强度 = 0
+      b0.set([0, 0, 0, 0], 4);    // A 频率
+      b0.set([0, 0, 0, 101], 8);  // A 强度 (101=停用)
+      b0.set([0, 0, 0, 0], 12);   // B 频率
+      b0.set([0, 0, 0, 101], 16); // B 强度
+      await writeChar.writeValueWithoutResponse(b0);
+      log('B0 初始化已发送 (两通道绝对值 0)', 'info');
+
+      await sleep(500);
+
+      await notifyChar.stopNotifications();
+      log('已停止通知', 'info');
+
+      statusEl.innerHTML =
+        b1Received
+          ? '<div class="status status-ok">协议测试通过！设备已回应 B1。</div>'
+          : '<div class="status status-warn">协议测试: BF/B0 已发送，未收到 B1 回应 (seq=0 时无回应属正常)。</div>';
+    } catch (e) {
+      log(`协议测试异常: ${e.message}`, 'warn');
+      statusEl.innerHTML = '<div class="status status-warn">协议测试跳过 (配对本身已成功)。</div>';
+    }
+
+    // ---- 断开 (权限保留在浏览器) ----
+    if (gatt.connected) {
+      gatt.disconnect();
+      log('GATT 已断开 (设备权限已缓存到浏览器)', 'info');
+    }
+
+    // ---- 显示结果 ----
+    resultCard.style.display = 'block';
+    detailsEl.innerHTML = `
+      <dt>名称</dt><dd>${displayName}</dd>
+      <dt>ID</dt><dd style="font-size:0.75rem;">${device.id}</dd>
+      <dt>V3 服务</dt><dd style="color:var(--green)">已发现</dd>
+      <dt>电量</dt><dd>${batteryLevel !== null ? batteryLevel + '%' : '未知'}</dd>
+    `;
+    resultStatus.innerHTML = '<div class="status status-ok">配对完成！浏览器已记住此设备，同源下的其他网页可通过 getDevices() 直接重连。</div>';
+
+    btn.textContent = '配对其他设备';
+    btn.disabled = false;
+
+    log('=== 配对完成 ===', 'ok');
+
+  } catch (err) {
+    log(`错误: ${err.message}`, 'err');
+    statusEl.innerHTML = `<div class="status status-err">${err.message}</div>`;
+    btn.textContent = '重试';
+    btn.disabled = false;
+
+    if (gatt && gatt.connected) {
+      try { gatt.disconnect(); } catch (_) {}
+    }
+  }
+}
+
+// =========================================================================
+// 工具函数
+// =========================================================================
+function isCoyoteName(name) {
+  return !!(name &&
+    (name.startsWith('47L121') ||
+     name.startsWith('47L120') ||
+     name.startsWith('D-LAB ESTIM')));
+}
+
+async function readGapName(server) {
+  try {
+    const svc = await server.getPrimaryService(GAP_SERVICE);
+    const chr = await svc.getCharacteristic(GAP_NAME);
+    const data = await chr.readValue();
+    return new TextDecoder('utf-8').decode(data).replace(/\x00/g, '').trim();
+  } catch {
+    return null;
+  }
+}
+
+function propsStr(chr) {
+  const p = [];
+  if (chr.properties) {
+    for (const k of ['write', 'writeWithoutResponse', 'notify', 'read', 'indicate']) {
+      if (chr.properties[k]) p.push(k);
+    }
+  }
+  return p.length ? p.join(', ') : '未知';
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+</script>
+</body>
+</html>

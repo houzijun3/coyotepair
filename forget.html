@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forget BLE Devices</title>
+<style>
+  body { font-family: system-ui; background: #0f172a; color: #e2e8f0; padding: 40px; max-width: 600px; margin: 0 auto; }
+  button { padding: 10px 20px; font-size: 0.9rem; border-radius: 8px; border: none; cursor: pointer; margin: 4px; }
+  .btn-danger { background: #ef4444; color: white; }
+  .btn-muted { background: #475569; color: white; }
+  .ok { color: #22c55e; }
+  .err { color: #ef4444; }
+  .warn { color: #f59e0b; }
+  code { background: #1e293b; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; }
+  .card { background: #1e293b; border-radius: 12px; padding: 16px; margin: 12px 0; }
+  .card h3 { margin-top: 0; }
+  ol { padding-left: 18px; line-height: 2; }
+</style>
+</head>
+<body>
+<h2>Forget Paired BLE Devices</h2>
+
+<div class="card">
+  <h3>Method 1: One-click (Chrome 124+)</h3>
+  <p id="api-status" style="font-size:0.85rem;"></p>
+  <button class="btn-danger" onclick="forgetAll()">Forget All Devices</button>
+  <button class="btn-muted" onclick="window.close()">Close</button>
+  <pre id="msg"></pre>
+</div>
+
+<div class="card">
+  <h3>Method 2: Chrome Settings (any version)</h3>
+  <ol style="font-size:0.9rem;">
+    <li>Open a new tab, paste in address bar:<br><code>chrome://settings/content/bluetoothDevices</code></li>
+    <li>Find your site (e.g. <code>localhost:4517</code>)</li>
+    <li>Click the trash icon to delete the paired device</li>
+  </ol>
+</div>
+
+<script>
+const apiStatus = document.getElementById('api-status');
+
+if (typeof navigator.bluetooth?.getDevices === 'function') {
+  apiStatus.innerHTML = '<span class="ok">getDevices() API available</span>';
+} else {
+  apiStatus.innerHTML = '<span class="warn">getDevices() not available (Chrome &lt; 124). Use Method 2 below.</span>';
+  document.querySelector('.btn-danger').disabled = true;
+  document.querySelector('.btn-danger').textContent = 'Unavailable (update Chrome)';
+}
+
+async function forgetAll() {
+  const msg = document.getElementById('msg');
+  if (typeof navigator.bluetooth?.getDevices !== 'function') {
+    msg.textContent = 'Not supported in this Chrome version.';
+    msg.className = 'err';
+    return;
+  }
+  const devices = await navigator.bluetooth.getDevices();
+  if (!devices.length) {
+    msg.textContent = 'No paired devices found.';
+    msg.className = 'ok';
+    return;
+  }
+  let count = 0;
+  for (const d of devices) {
+    try { await d.forget(); count++; }
+    catch (e) { msg.textContent += `Failed: ${d.name}: ${e.message}\n`; }
+  }
+  msg.textContent = `Forgotten ${count} device(s).`;
+  msg.className = 'ok';
+}
+</script>
+</body>
+</html>
