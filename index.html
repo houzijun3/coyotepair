@@ -103,7 +103,8 @@
 // =========================================================================
 // Coyote BLE 常量
 // =========================================================================
-const COYOTE_MFR_ID = 0x369b;
+// 注意: 厂商 ID 因批次不同而变化，不可靠。以下为所有 V3 设备的共同特征。
+
 const V3_NAME_PREFIX = '47L121';
 const V3_SERVICE = '0000180c-0000-1000-8000-00805f9b34fb';
 const V3_WRITE   = '0000150a-0000-1000-8000-00805f9b34fb';
@@ -115,12 +116,13 @@ const GAP_NAME    = '00002a00-0000-1000-8000-00805f9b34fb';
 
 const OPTIONAL_SERVICES = [V3_SERVICE, BATTERY_SVC, GAP_SERVICE];
 
+// 过滤条件: services (0x180C) + namePrefix (47L121) — 所有 V3 都具备
+// 不含 manufacturerData，因为厂商 ID 随批次变动
 const COYOTE_FILTERS = [
-  { manufacturerData: [{ companyIdentifier: COYOTE_MFR_ID }] },
+  { services: [V3_SERVICE] },
   { namePrefix: V3_NAME_PREFIX },
   { namePrefix: '47L120' },
   { namePrefix: 'D-LAB ESTIM' },
-  { services: [V3_SERVICE] },
 ];
 
 // =========================================================================
@@ -163,36 +165,18 @@ async function pairDevice() {
   btn.textContent = '扫描中...';
 
   let device, gatt, server;
-  let usedAcceptAll = false;
 
   try {
-    // ---- 阶段 1: 过滤扫描 ----
-    log('阶段 1: 过滤扫描 (厂商 ID 0x369B + 名称 + 服务)', 'info');
-    statusEl.innerHTML = '<div class="status status-info">正在查找郊狼设备<span class="dots"></span></div>';
+    // 郊狼 V3 通常不广播名称，无法用 namePrefix 预筛选。
+    // 直接用 acceptAllDevices 显示全部设备，GATT 连接后再验证身份。
+    statusEl.innerHTML = '<div class="status status-info">正在打开设备选择器<span class="dots"></span><br><small style="color:#94a3b8;">将郊狼靠近电脑，选信号最强的那个</small></div>';
 
-    try {
-      device = await navigator.bluetooth.requestDevice({
-        filters: COYOTE_FILTERS,
-        optionalServices: OPTIONAL_SERVICES,
-      });
-    } catch (e) {
-      if (e.name === 'NotFoundError') {
-        log('阶段 1 未找到设备 (旧版 Chrome 或无名称广播)。进入阶段 2...', 'warn');
-        statusEl.innerHTML = '<div class="status status-warn">过滤未找到设备，显示全部 BLE 设备<span class="dots"></span></div>';
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: OPTIONAL_SERVICES,
+    });
 
-        // ---- 阶段 2: 显示全部设备 ----
-        device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: OPTIONAL_SERVICES,
-        });
-        usedAcceptAll = true;
-        log('阶段 2: 用户从全部设备列表中选择了设备', 'info');
-      } else {
-        throw e;
-      }
-    }
-
-    log(`已选择设备: "${device.name || '(无名称)'}" [${device.id}]`, 'info');
+    log(`用户选择了: "${device.name || '(无名称)'}" [${device.id}]`, 'info');
 
     // ---- GATT 连接 ----
     statusEl.innerHTML = '<div class="status status-info">正在 GATT 连接<span class="dots"></span></div>';
@@ -203,24 +187,46 @@ async function pairDevice() {
     log('GATT 已连接', 'ok');
 
     // ---- 验证郊狼身份 ----
+    // 唯一可靠判断: GATT 连接后读 GAP Device Name + 检查 V3 服务
     const displayName = device.name || '(无名称)';
+    let isCoyote = false;
 
-    if (usedAcceptAll && !isCoyoteName(displayName)) {
-      log('通过 GAP Device Name 验证设备身份...', 'info');
-      const gattName = await readGapName(server);
-      log(`GAP Device Name: "${gattName || '无'}"`, 'info');
+    // Step 1: 读 GAP Device Name — 所有郊狼 V3 都返回 "47L121000"
+    log('读取 GAP Device Name...', 'info');
+    const gattName = await readGapName(server);
+    log(`GAP Device Name: "${gattName || '无'}"`, 'info');
 
-      if (!gattName || !isCoyoteName(gattName)) {
-        gatt.disconnect();
-        throw new Error(
-          `该设备不是郊狼脉冲主机 (GATT 名称: "${gattName || '无'}")。` +
-          '请重新选择信号最强的那个设备。'
-        );
-      }
-      log('GAP 名称验证通过，确认为郊狼设备', 'ok');
+    if (gattName && isCoyoteName(gattName)) {
+      isCoyote = true;
+      log('GAP 名称匹配 — 确认为郊狼设备', 'ok');
     }
 
-    // ---- 发现郊狼服务 ----
+    // Step 2: 再验证 V3 服务 — 双重确认
+    if (!isCoyote) {
+      // 名称不匹配，试试直接找 V3 服务作为最后的验证
+      log('GAP 名称不匹配，尝试直接发现 V3 服务...', 'info');
+    }
+
+    try {
+      const coyoteService = await server.getPrimaryService(V3_SERVICE);
+      if (coyoteService) {
+        isCoyote = true;
+        log('V3 服务 (0x180C) 存在 — 确认为郊狼设备', 'ok');
+      }
+    } catch {
+      // V3 service not found
+    }
+
+    if (!isCoyote) {
+      gatt.disconnect();
+      throw new Error(
+        `该设备不是郊狼脉冲主机。` +
+        `GATT 名称: "${gattName || '无'}", V3 服务: 未找到。` +
+        '请将郊狼靠近电脑，选择信号最强的设备重试。'
+      );
+    }
+
+    // ---- 发现郊狼 V3 服务 ---
     statusEl.innerHTML = '<div class="status status-info">正在发现服务<span class="dots"></span></div>';
 
     let coyoteService, writeChar, notifyChar, batteryLevel = null;
